@@ -36,6 +36,7 @@ import android.text.InputType;
 import android.text.style.ForegroundColorSpan;
 import android.util.AttributeSet;
 import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -422,73 +423,72 @@ public class SettingsActivity extends BaseActivity implements PreferenceFragment
                 option.setPadding(0, optionPadding, 0, optionPadding);
                 options.addView(option);
             }
+            content.addView(options);
+
+            EditText customInput = new EditText(requireContext());
+            customInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+            customInput.setHint(R.string.vpn_mtu_custom_hint);
+            customInput.setText(Integer.toString(currentMtu));
+            customInput.setSelectAllOnFocus(true);
+            customInput.setSingleLine(true);
+            customInput.setVisibility(checkedItem == 3 ? View.VISIBLE : View.GONE);
+            content.addView(customInput);
+
             options.check(optionIds[checkedItem]);
             options.setOnCheckedChangeListener((group, checkedId) -> {
                 for(int i = 0; i < optionIds.length; i++) {
-                    if(optionIds[i] == checkedId) {
-                        selectedItem[0] = i;
-                        break;
+                    if(optionIds[i] != checkedId)
+                        continue;
+
+                    selectedItem[0] = i;
+                    boolean isCustom = (i == 3);
+                    customInput.setVisibility(isCustom ? View.VISIBLE : View.GONE);
+                    if(isCustom) {
+                        customInput.post(() -> {
+                            customInput.requestFocus();
+                            customInput.selectAll();
+                            InputMethodManager keyboard = ContextCompat.getSystemService(
+                                    requireContext(), InputMethodManager.class);
+                            if(keyboard != null)
+                                keyboard.showSoftInput(customInput, InputMethodManager.SHOW_IMPLICIT);
+                        });
                     }
+                    break;
                 }
             });
-            content.addView(options);
 
             ScrollView scrollView = new ScrollView(requireContext());
             scrollView.setFillViewport(true);
             scrollView.addView(content);
 
-            new AlertDialog.Builder(requireContext())
+            AlertDialog dialog = new AlertDialog.Builder(requireContext())
                     .setTitle(R.string.vpn_mtu_dialog_title)
                     .setView(scrollView)
                     .setNegativeButton(R.string.cancel_action, null)
-                    .setPositiveButton(R.string.ok, (dialog, which) -> {
-                        int selected = selectedItem[0];
-
-                        if(selected == 3) {
-                            showCustomVpnMtuDialog(preference, currentMtu);
-                            return;
-                        }
-
-                        int mtu = (selected == 0) ? 1500 : ((selected == 1) ? 1280 : 10000);
-                        prefs.edit().putString(Prefs.PREF_VPN_MTU, Integer.toString(mtu)).apply();
-                        updateVpnMtuSummary(preference);
-                    })
-                    .show();
-        }
-
-        private void showCustomVpnMtuDialog(Preference preference, int currentMtu) {
-            EditText input = new EditText(requireContext());
-            input.setInputType(InputType.TYPE_CLASS_NUMBER);
-            input.setHint(R.string.vpn_mtu_custom_hint);
-            input.setText(Integer.toString(currentMtu));
-            input.setSelectAllOnFocus(true);
-
-            int horizontalPadding = (int) (24 * getResources().getDisplayMetrics().density);
-            AlertDialog dialog = new AlertDialog.Builder(requireContext())
-                    .setTitle(R.string.vpn_mtu_custom_title)
-                    .setMessage(R.string.vpn_mtu_custom_message)
-                    .setView(input, horizontalPadding, 0, horizontalPadding, 0)
-                    .setNegativeButton(R.string.cancel_action, null)
                     .setPositiveButton(R.string.ok, null)
                     .create();
-
             dialog.setOnShowListener(ignored ->
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                        int selected = selectedItem[0];
                         int mtu;
 
-                        try {
-                            mtu = Integer.parseInt(input.getText().toString());
-                        } catch(NumberFormatException e) {
-                            input.setError(getString(R.string.vpn_mtu_invalid));
-                            return;
+                        if(selected == 3) {
+                            try {
+                                mtu = Integer.parseInt(customInput.getText().toString());
+                            } catch(NumberFormatException e) {
+                                customInput.setError(getString(R.string.vpn_mtu_invalid));
+                                return;
+                            }
+
+                            if((mtu < Prefs.MIN_VPN_MTU) || (mtu > Prefs.MAX_VPN_MTU)) {
+                                customInput.setError(getString(R.string.vpn_mtu_invalid));
+                                return;
+                            }
+                        } else {
+                            mtu = (selected == 0) ? 1500 : ((selected == 1) ? 1280 : 10000);
                         }
 
-                        if((mtu < Prefs.MIN_VPN_MTU) || (mtu > Prefs.MAX_VPN_MTU)) {
-                            input.setError(getString(R.string.vpn_mtu_invalid));
-                            return;
-                        }
-
-                        PreferenceManager.getDefaultSharedPreferences(requireContext()).edit()
+                        prefs.edit()
                                 .putString(Prefs.PREF_VPN_MTU, Integer.toString(mtu))
                                 .apply();
                         updateVpnMtuSummary(preference);
