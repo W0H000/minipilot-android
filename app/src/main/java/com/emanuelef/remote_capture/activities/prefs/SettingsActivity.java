@@ -37,6 +37,11 @@ import android.text.style.ForegroundColorSpan;
 import android.util.AttributeSet;
 import android.view.View;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -45,6 +50,7 @@ import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.widget.TextViewCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentTransaction;
@@ -383,7 +389,9 @@ public class SettingsActivity extends BaseActivity implements PreferenceFragment
                     getString(R.string.vpn_mtu_option_custom, currentMtu)
             };
             int[] selectedItem = {checkedItem};
-            CharSequence notice = getText(R.string.vpn_mtu_change_notice);
+            TextView notice = new TextView(requireContext());
+            notice.setText(R.string.vpn_mtu_change_notice);
+            TextViewCompat.setTextAppearance(notice, android.R.style.TextAppearance_Material_Subhead);
 
             if(CaptureService.isServiceActive()) {
                 SpannableString activeNotice = new SpannableString(
@@ -391,14 +399,47 @@ public class SettingsActivity extends BaseActivity implements PreferenceFragment
                 activeNotice.setSpan(new ForegroundColorSpan(
                                 ContextCompat.getColor(requireContext(), R.color.warning)),
                         0, activeNotice.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                notice = activeNotice;
+                notice.setText(activeNotice);
             }
+
+            float density = getResources().getDisplayMetrics().density;
+            int horizontalPadding = (int) (24 * density);
+            int verticalPadding = (int) (12 * density);
+            int optionPadding = (int) (8 * density);
+            LinearLayout content = new LinearLayout(requireContext());
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.setPadding(horizontalPadding, verticalPadding, horizontalPadding, 0);
+            notice.setPadding(0, 0, 0, verticalPadding);
+            content.addView(notice);
+
+            RadioGroup options = new RadioGroup(requireContext());
+            int[] optionIds = new int[choices.length];
+            for(int i = 0; i < choices.length; i++) {
+                RadioButton option = new RadioButton(requireContext());
+                optionIds[i] = View.generateViewId();
+                option.setId(optionIds[i]);
+                option.setText(choices[i]);
+                option.setPadding(0, optionPadding, 0, optionPadding);
+                options.addView(option);
+            }
+            options.check(optionIds[checkedItem]);
+            options.setOnCheckedChangeListener((group, checkedId) -> {
+                for(int i = 0; i < optionIds.length; i++) {
+                    if(optionIds[i] == checkedId) {
+                        selectedItem[0] = i;
+                        break;
+                    }
+                }
+            });
+            content.addView(options);
+
+            ScrollView scrollView = new ScrollView(requireContext());
+            scrollView.setFillViewport(true);
+            scrollView.addView(content);
 
             new AlertDialog.Builder(requireContext())
                     .setTitle(R.string.vpn_mtu_dialog_title)
-                    .setMessage(notice)
-                    .setSingleChoiceItems(choices, checkedItem,
-                            (dialog, which) -> selectedItem[0] = which)
+                    .setView(scrollView)
                     .setNegativeButton(R.string.cancel_action, null)
                     .setPositiveButton(R.string.ok, (dialog, which) -> {
                         int selected = selectedItem[0];
