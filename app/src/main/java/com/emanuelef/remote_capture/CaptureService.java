@@ -106,7 +106,6 @@ public class CaptureService extends VpnService implements Runnable {
     private static final String NOTIFY_CHAN_VPNSERVICE = "VPNService";
     private static final String NOTIFY_CHAN_MALWARE_DETECTION = "Malware detection";
     private static final String NOTIFY_CHAN_OTHER = "Other";
-    private static final int VPN_MTU = 10000;
     public static final int NOTIFY_ID_VPNSERVICE = 1;
     public static final int NOTIFY_ID_LOW_MEMORY = 2;
     public static final int NOTIFY_ID_APP_BLOCKED = 3;
@@ -132,6 +131,7 @@ public class CaptureService extends VpnService implements Runnable {
     private String vpn_ipv4;
     private String vpn_dns;
     private String dns_server;
+    private int mVpnMtu = Prefs.DEFAULT_VPN_MTU;
     private long last_bytes;
     private int last_connections;
     private int[] mAppFilterUids;
@@ -317,6 +317,10 @@ public class CaptureService extends VpnService implements Runnable {
             mSettings.capture_interface = mSettings.input_pcap_path;
         }
 
+        // Snapshot the MTU for this capture session. Both the Android TUN interface and zdtun
+        // retrieve this instance value, so preference changes only affect the next capture.
+        mVpnMtu = mSettings.vpn_mtu;
+
         // Retrieve DNS server
         String fallbackDnsV4 = Prefs.getDnsServerV4(mPrefs);
         dns_server = fallbackDnsV4;
@@ -484,7 +488,7 @@ public class CaptureService extends VpnService implements Runnable {
             /* In order to see the DNS packets into the VPN we must set an internal address as the DNS
              * server. */
             Builder builder = new Builder()
-                    .setMtu(VPN_MTU);
+                    .setMtu(mVpnMtu);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 builder.setMetered(false);
@@ -1475,7 +1479,7 @@ public class CaptureService extends VpnService implements Runnable {
 
     public int getPayloadMode() { return getCurPayloadMode().ordinal(); }
 
-    public int getVpnMTU()      { return VPN_MTU; }
+    public int getVpnMTU()      { return mVpnMtu; }
 
     public int getBlockQuickMode() { return mSettings.block_quic_mode.ordinal(); }
 

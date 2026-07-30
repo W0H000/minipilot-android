@@ -91,6 +91,38 @@ intent.setClassName("com.emanuelef.remote_capture", "com.emanuelef.remote_captur
 intent.putExtra("api_key", "your_api_key_here");
 ```
 
+### API Key preflight validation
+
+ADB-based automation can validate an API key without starting a capture, opening
+an activity, or creating a VPN by sending an explicit ordered broadcast:
+
+```
+adb shell am broadcast --user current --receiver-foreground \
+  -a com.emanuelef.remote_capture.action.VALIDATE_API_KEY \
+  -n com.emanuelef.remote_capture/com.emanuelef.remote_capture.ApiKeyValidationReceiver \
+  --es api_key your_api_key_here
+```
+
+For the debug application ID, use this component instead:
+
+```
+com.emanuelef.remote_capture.debug/com.emanuelef.remote_capture.ApiKeyValidationReceiver
+```
+
+The broadcast result contains a stable result code and data token:
+
+| Result | Data token | Meaning |
+|--------|------------|---------|
+| 100 | `PCAPDROID_API_KEY_VALID` | The key is valid |
+| 101 | `PCAPDROID_API_KEY_INVALID` | The provided key does not match |
+| 102 | `PCAPDROID_API_KEY_NOT_CONFIGURED` | No key was generated in PCAPdroid |
+| 103 | `PCAPDROID_API_KEY_MISSING` | The request did not contain a key |
+| 104 | `PCAPDROID_API_KEY_BAD_REQUEST` | The request action is invalid |
+
+The response extras include `protocol_version=1`. A result code of `0`, a
+missing data token, or an Activity Manager error indicates that this preflight
+endpoint is unavailable and the caller should fail closed.
+
 ## Capture Settings
 
 As shown above, the capture settings can be specified by using intent extras. The updated list of all the supported parameters is available in
@@ -116,6 +148,7 @@ As shown above, the capture settings can be specified by using intent extras. Th
 | tls_decryption          | bool   | 49  | vpn  | true to enable the built-in TLS decryption                                                                                            |
 | auto_block_private_dns  | bool   | 51  | vpn  | true to detect and possibly block private DNS to inspect traffic                                                                      |
 | ip_mode                 | string | 56  | vpn  | which IP addresses to use for the VPN: ipv4 \| ipv6 \| both                                                                           |
+| vpn_mtu                 | int    | 91  | vpn  | VPN MTU in the 1280–10000 range; defaults to the value saved in the app settings                                                       |
 | mitmproxy_opts          | string | 62  |      | additional options to provide to mitmproxy in decryption mode                                                                         |
 | pcap_name               | string | 62  |      | write the PCAP to Download/PCAPdroid/*pcap_name* in pcap_file mode                                                                    |
 | pcapng_format           | bool   | 62  |      | true to use the PCAPNG dump format*                                                                                                   |

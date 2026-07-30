@@ -5,6 +5,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 
+import androidx.preference.PreferenceManager;
+
 import com.emanuelef.remote_capture.Billing;
 
 import java.io.Serializable;
@@ -42,6 +44,7 @@ public class CaptureSettings implements Serializable {
     public int snaplen = 0;
     public int max_pkts_per_flow = 0;
     public int max_dump_size = 0;
+    public int vpn_mtu;
     public String mitmproxy_opts;
 
     public CaptureSettings(Context ctx, SharedPreferences prefs) {
@@ -50,6 +53,7 @@ public class CaptureSettings implements Serializable {
         collector_address = Prefs.getCollectorIp(prefs);
         collector_port = Prefs.getCollectorPort(prefs);
         http_server_port = Prefs.getHttpServerPort(prefs);
+        vpn_mtu = Prefs.getVpnMtu(prefs);
         socks5_enabled = Prefs.getSocks5Enabled(prefs);
         socks5_proxy_address = Prefs.getSocks5ProxyHost(prefs);
         socks5_proxy_port = Prefs.getSocks5ProxyPort(prefs);
@@ -74,6 +78,7 @@ public class CaptureSettings implements Serializable {
         collector_address = getString(intent, Prefs.PREF_COLLECTOR_IP_KEY, "127.0.0.1");
         collector_port = getInt(intent, Prefs.PREF_COLLECTOR_PORT_KEY, 1234);
         http_server_port = getInt(intent, Prefs.PREF_HTTP_SERVER_PORT, 8080);
+        vpn_mtu = getVpnMtu(ctx, intent);
         socks5_enabled = getBool(intent, Prefs.PREF_SOCKS5_ENABLED_KEY, false);
         socks5_proxy_address = getString(intent, Prefs.PREF_SOCKS5_PROXY_HOST_KEY,
                 getString(intent, Prefs.PREF_SOCKS5_PROXY_IP_KEY, "0.0.0.0"));
@@ -99,6 +104,17 @@ public class CaptureSettings implements Serializable {
         sslkeylog_name = getString(intent, "sslkeylog_name", "");
         decryption_rules_json = getDecryptionRulesFromIntent(intent);
         api_capture = true;
+    }
+
+    private static int getVpnMtu(Context ctx, Intent intent) {
+        int savedMtu = Prefs.getVpnMtu(PreferenceManager.getDefaultSharedPreferences(ctx));
+        Bundle extras = intent.getExtras();
+
+        if((extras == null) || !extras.containsKey(Prefs.PREF_VPN_MTU))
+            return savedMtu;
+
+        Object value = extras.get(Prefs.PREF_VPN_MTU);
+        return Prefs.getVpnMtu((value != null) ? value.toString() : null, savedMtu);
     }
 
     private String getDecryptionRulesFromIntent(Intent intent){

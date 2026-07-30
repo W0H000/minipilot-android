@@ -30,13 +30,18 @@ import android.os.LocaleList;
 import android.provider.Settings;
 import android.system.Os;
 import android.system.OsConstants;
+import android.text.SpannableString;
+import android.text.Spanned;
 import android.text.InputType;
+import android.text.style.ForegroundColorSpan;
 import android.util.AttributeSet;
 import android.view.View;
+import android.widget.EditText;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -51,6 +56,7 @@ import androidx.preference.PreferenceManager;
 import androidx.preference.SwitchPreference;
 
 import com.emanuelef.remote_capture.Billing;
+import com.emanuelef.remote_capture.CaptureService;
 import com.emanuelef.remote_capture.Log;
 import com.emanuelef.remote_capture.PCAPdroid;
 import com.emanuelef.remote_capture.Utils;
@@ -315,6 +321,13 @@ public class SettingsActivity extends BaseActivity implements PreferenceFragment
             mCapInterface = requirePreference(Prefs.PREF_CAPTURE_INTERFACE);
             refreshInterfaces();
 
+            Preference vpnMtu = requirePreference(Prefs.PREF_VPN_MTU);
+            updateVpnMtuSummary(vpnMtu);
+            vpnMtu.setOnPreferenceClickListener(preference -> {
+                showVpnMtuDialog(preference);
+                return true;
+            });
+
             mRootCaptureEnabled = requirePreference(Prefs.PREF_ROOT_CAPTURE);
             if(Utils.isRootAvailable()) {
                 mRootCaptureEnabled.setOnPreferenceChangeListener((preference, newValue) -> {
@@ -334,6 +347,113 @@ public class SettingsActivity extends BaseActivity implements PreferenceFragment
                 startActivity(intent);
                 return true;
             });
+        }
+
+        private void updateVpnMtuSummary(Preference preference) {
+            int mtu = Prefs.getVpnMtu(PreferenceManager.getDefaultSharedPreferences(requireContext()));
+
+            if(mtu == 1500)
+                preference.setSummary(R.string.vpn_mtu_summary_standard);
+            else if(mtu == 1280)
+                preference.setSummary(R.string.vpn_mtu_summary_compatibility);
+            else if(mtu == 10000)
+                preference.setSummary(R.string.vpn_mtu_summary_throughput);
+            else
+                preference.setSummary(getString(R.string.vpn_mtu_summary_custom, mtu));
+        }
+
+        private void showVpnMtuDialog(Preference preference) {
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(requireContext());
+            int currentMtu = Prefs.getVpnMtu(prefs);
+            int checkedItem;
+
+            if(currentMtu == 1500)
+                checkedItem = 0;
+            else if(currentMtu == 1280)
+                checkedItem = 1;
+            else if(currentMtu == 10000)
+                checkedItem = 2;
+            else
+                checkedItem = 3;
+
+            CharSequence[] choices = {
+                    getText(R.string.vpn_mtu_option_standard),
+                    getText(R.string.vpn_mtu_option_compatibility),
+                    getText(R.string.vpn_mtu_option_throughput),
+                    getString(R.string.vpn_mtu_option_custom, currentMtu)
+            };
+            int[] selectedItem = {checkedItem};
+            CharSequence notice = getText(R.string.vpn_mtu_change_notice);
+
+            if(CaptureService.isServiceActive()) {
+                SpannableString activeNotice = new SpannableString(
+                        getText(R.string.vpn_mtu_change_notice_active));
+                activeNotice.setSpan(new ForegroundColorSpan(
+                                ContextCompat.getColor(requireContext(), R.color.warning)),
+                        0, activeNotice.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                notice = activeNotice;
+            }
+
+            new AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.vpn_mtu_dialog_title)
+                    .setMessage(notice)
+                    .setSingleChoiceItems(choices, checkedItem,
+                            (dialog, which) -> selectedItem[0] = which)
+                    .setNegativeButton(R.string.cancel_action, null)
+                    .setPositiveButton(R.string.ok, (dialog, which) -> {
+                        int selected = selectedItem[0];
+
+                        if(selected == 3) {
+                            showCustomVpnMtuDialog(preference, currentMtu);
+                            return;
+                        }
+
+                        int mtu = (selected == 0) ? 1500 : ((selected == 1) ? 1280 : 10000);
+                        prefs.edit().putString(Prefs.PREF_VPN_MTU, Integer.toString(mtu)).apply();
+                        updateVpnMtuSummary(preference);
+                    })
+                    .show();
+        }
+
+        private void showCustomVpnMtuDialog(Preference preference, int currentMtu) {
+            EditText input = new EditText(requireContext());
+            input.setInputType(InputType.TYPE_CLASS_NUMBER);
+            input.setHint(R.string.vpn_mtu_custom_hint);
+            input.setText(Integer.toString(currentMtu));
+            input.setSelectAllOnFocus(true);
+
+            int horizontalPadding = (int) (24 * getResources().getDisplayMetrics().density);
+            AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.vpn_mtu_custom_title)
+                    .setMessage(R.string.vpn_mtu_custom_message)
+                    .setView(input, horizontalPadding, 0, horizontalPadding, 0)
+                    .setNegativeButton(R.string.cancel_action, null)
+                    .setPositiveButton(R.string.ok, null)
+                    .create();
+
+            dialog.setOnShowListener(ignored ->
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                        int mtu;
+
+                        try {
+                            mtu = Integer.parseInt(input.getText().toString());
+                        } catch(NumberFormatException e) {
+                            input.setError(getString(R.string.vpn_mtu_invalid));
+                            return;
+                        }
+
+                        if((mtu < Prefs.MIN_VPN_MTU) || (mtu > Prefs.MAX_VPN_MTU)) {
+                            input.setError(getString(R.string.vpn_mtu_invalid));
+                            return;
+                        }
+
+                        PreferenceManager.getDefaultSharedPreferences(requireContext()).edit()
+                                .putString(Prefs.PREF_VPN_MTU, Integer.toString(mtu))
+                                .apply();
+                        updateVpnMtuSummary(preference);
+                        dialog.dismiss();
+                    }));
+            dialog.show();
         }
 
         private void setupSecurityPrefs() {

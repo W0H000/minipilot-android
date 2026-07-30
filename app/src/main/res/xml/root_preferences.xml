@@ -132,6 +132,11 @@
             app:summary="@string/vpn_exemptions_summary"
             app:iconSpaceReserved="false" />
 
+        <Preference
+            app:key="vpn_mtu"
+            app:title="@string/vpn_mtu"
+            app:iconSpaceReserved="false" />
+
         <SwitchPreference
             app:key="pcapng_format"
             app:title="@string/pcapng_format"

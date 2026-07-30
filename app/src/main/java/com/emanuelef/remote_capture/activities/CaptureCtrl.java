@@ -53,6 +53,7 @@ import com.emanuelef.remote_capture.PersistableUriPermission;
 import com.emanuelef.remote_capture.R;
 import com.emanuelef.remote_capture.Utils;
 import com.emanuelef.remote_capture.model.AppDescriptor;
+import com.emanuelef.remote_capture.model.ApiKeyAuth;
 import com.emanuelef.remote_capture.model.CaptureSettings;
 import com.emanuelef.remote_capture.model.CtrlPermissions;
 import com.emanuelef.remote_capture.model.CaptureStats;
@@ -122,9 +123,7 @@ public class CaptureCtrl extends AppCompatActivity {
         if(api_key != null) {
             // authenticate via API key
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-            String my_key = Prefs.getApiKey(prefs);
-
-            if (!my_key.isEmpty() && my_key.equals(api_key)) {
+            if (ApiKeyAuth.validate(prefs, api_key) == ApiKeyAuth.Result.VALID) {
                 processRequest(intent, action);
                 return;
             }

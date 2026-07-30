@@ -144,6 +144,9 @@
         </service>
 
         <receiver android:name="com.emanuelef.remote_capture.ActionReceiver" />
+        <receiver
+            android:name=".ApiKeyValidationReceiver"
+            android:exported="true" />
 
         <receiver
             android:name=".BootReceiver"

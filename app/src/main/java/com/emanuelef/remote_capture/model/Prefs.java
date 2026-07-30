@@ -56,6 +56,9 @@ public class Prefs {
     public static final String PAYLOAD_MODE_MINIMAL = "minimal";
     public static final String PAYLOAD_MODE_FULL = "full";
     public static final String DEFAULT_PAYLOAD_MODE = PAYLOAD_MODE_MINIMAL;
+    public static final int DEFAULT_VPN_MTU = 1500;
+    public static final int MIN_VPN_MTU = 1280;
+    public static final int MAX_VPN_MTU = 10000;
 
     // used to initialize the whitelist with some safe defaults
     public static final int FIREWALL_WHITELIST_INIT_VER = 1;
@@ -113,6 +116,7 @@ public class Prefs {
     public static final String PREF_IGNORED_MITM_VERSION = "ignored_mitm_version";
     public static final String PREF_API_KEY = "api_key";
     public static final String PREF_FILENAME_PREFIX = "filename_prefix";
+    public static final String PREF_VPN_MTU = "vpn_mtu";
 
     public enum DumpMode {
         NONE,
@@ -199,6 +203,28 @@ public class Prefs {
     public static int getCollectorPort(SharedPreferences p)  { return(Integer.parseInt(p.getString(PREF_COLLECTOR_PORT_KEY, "1234"))); }
     public static DumpMode getDumpMode(SharedPreferences p)  { return(getDumpMode(p.getString(PREF_PCAP_DUMP_MODE, DEFAULT_DUMP_MODE))); }
     public static int getHttpServerPort(SharedPreferences p) { return(Integer.parseInt(p.getString(Prefs.PREF_HTTP_SERVER_PORT, "8080"))); }
+    public static int getVpnMtu(SharedPreferences p) {
+        try {
+            return getVpnMtu(p.getString(PREF_VPN_MTU, Integer.toString(DEFAULT_VPN_MTU)), DEFAULT_VPN_MTU);
+        } catch (ClassCastException e) {
+            try {
+                return getVpnMtu(Integer.toString(p.getInt(PREF_VPN_MTU, DEFAULT_VPN_MTU)), DEFAULT_VPN_MTU);
+            } catch (ClassCastException ignored) {
+                return DEFAULT_VPN_MTU;
+            }
+        }
+    }
+    public static int getVpnMtu(String value, int fallback) {
+        int mtu;
+
+        try {
+            mtu = Integer.parseInt(value);
+        } catch (NumberFormatException | NullPointerException e) {
+            mtu = fallback;
+        }
+
+        return Math.max(MIN_VPN_MTU, Math.min(MAX_VPN_MTU, mtu));
+    }
     public static boolean getTlsDecryptionEnabled(SharedPreferences p) { return(p.getBoolean(PREF_TLS_DECRYPTION_KEY, false)); }
     public static boolean getSocks5Enabled(SharedPreferences p)     { return(p.getBoolean(PREF_SOCKS5_ENABLED_KEY, false)); }
     public static String getSocks5ProxyHost(SharedPreferences p)    { return(p.getString(PREF_SOCKS5_PROXY_IP_KEY, "0.0.0.0")); }
