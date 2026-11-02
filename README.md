@@ -41,6 +41,9 @@ You can test the latest features before the official release by adding the [Beta
 
 Check out the [quick start instructions](https://emanuele-f.github.io/PCAPdroid/quick_start) or the full [User Guide](https://emanuele-f.github.io/PCAPdroid).
 
+For this fork's automatic IPv4 DNS selection during VPN capture, including
+network switching and verification steps, see [System DNS](docs/system_dns.md).
+
 ## Sponsors
 
 The PCAPdroid project is sponsored by [AVEQ GmbH](https://aveq.info).

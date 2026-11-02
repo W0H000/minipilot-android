@@ -94,6 +94,7 @@ import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -130,7 +131,7 @@ public class CaptureService extends VpnService implements Runnable {
     private LinkedBlockingDeque<byte[]> mDumpQueue;
     private String vpn_ipv4;
     private String vpn_dns;
-    private String dns_server;
+    private volatile String dns_server;
     private int mVpnMtu = Prefs.DEFAULT_VPN_MTU;
     private long last_bytes;
     private int last_connections;
@@ -142,8 +143,10 @@ public class CaptureService extends VpnService implements Runnable {
     private String mPcapFname;
     private NotificationCompat.Builder mStatusBuilder;
     private NotificationCompat.Builder mMalwareBuilder;
-    private long mMonitoredNetwork;
-    private Network mUnderlyingNetwork;
+    private volatile Network mUnderlyingNetwork;
+    private Network mPreferredNetwork;
+    private LinkProperties mUnderlyingLinkProperties;
+    private final Set<Network> mLostNetworks = new HashSet<>();
     private ConnectivityManager.NetworkCallback mNetworkCallback;
     private AppsResolver mNativeAppsResolver; // can only be accessed by native code to avoid concurrency issues
     private Geolocation mNativeGeolocation;   // only native
@@ -340,25 +343,14 @@ public class CaptureService extends VpnService implements Runnable {
             mIfIndexToName.put(iface.getIndex(), iface.getName());
         }
 
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Service.CONNECTIVITY_SERVICE);
-            Network net = cm.getActiveNetwork();
-            mUnderlyingNetwork = net;
-
-            if(net != null) {
-                handleLinkProperties(cm.getLinkProperties(net));
-
-                if(Prefs.useSystemDns(mPrefs) || mSettings.root_capture) {
-                    dns_server = Utils.getDnsServer(cm, net);
-                    if (dns_server == null)
-                        dns_server = fallbackDnsV4;
-                    else {
-                        mMonitoredNetwork = net.getNetworkHandle();
-                        registerNetworkCallbacks();
-                    }
-                } else
-                    dns_server = fallbackDnsV4;
-            }
+        mUnderlyingNetwork = null;
+        mPreferredNetwork = null;
+        mUnderlyingLinkProperties = null;
+        mLostNetworks.clear();
+        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !mSettings.readFromPcap()) {
+            refreshUnderlyingNetwork(false);
+            // Keep monitoring even when no physical network/DNS is available at startup.
+            registerNetworkCallbacks();
         }
 
         vpn_dns = VPN_VIRTUAL_DNS_SERVER;
@@ -794,52 +786,95 @@ public class CaptureService extends VpnService implements Runnable {
     }
 
     @RequiresApi(api = Build.VERSION_CODES.M)
+    private void refreshUnderlyingNetwork(boolean updateNative) {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Service.CONNECTIVITY_SERVICE);
+        UnderlyingNetwork.Candidate selected = UnderlyingNetwork.find(cm, mLostNetworks, mPreferredNetwork);
+        Network network = selected != null ? selected.network : null;
+        LinkProperties properties = selected != null ? selected.properties : null;
+        String nextDns = UnderlyingNetwork.dns(selected,
+                Prefs.useSystemDns(mPrefs) || mSettings.root_capture, Prefs.getDnsServerV4(mPrefs));
+        boolean dnsChanged = !Objects.equals(dns_server, nextDns);
+        if(!Objects.equals(mUnderlyingNetwork, network) || dnsChanged) {
+            Log.i(TAG, "Underlying Internet network " + network + " ("
+                    + (properties != null ? properties.getInterfaceName() : "unavailable")
+                    + "), IPv4 DNS " + nextDns);
+        }
+        mUnderlyingNetwork = network;
+        dns_server = nextDns;
+        if(!Objects.equals(mUnderlyingLinkProperties, properties)) {
+            mUnderlyingLinkProperties = properties;
+            handleLinkProperties(properties);
+        }
+        if(updateNative && dnsChanged)
+            setDnsServer(nextDns);
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.M)
     private void registerNetworkCallbacks() {
         if(mNetworkCallback != null)
             return;
 
-        String fallbackDns = Prefs.getDnsServerV4(mPrefs);
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Service.CONNECTIVITY_SERVICE);
         mNetworkCallback = new ConnectivityManager.NetworkCallback() {
+            private void refresh(Network network, boolean lost) {
+                // Serialize with service startup/teardown. Ignore queued events from an
+                // unregistered callback and do not reselect a network reported as lost.
+                mHandler.post(() -> {
+                    if(mNetworkCallback != this)
+                        return;
+                    if(network != null) {
+                        if(lost)
+                            mLostNetworks.add(network);
+                        else
+                            mLostNetworks.remove(network);
+                        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            if(!lost)
+                                mPreferredNetwork = network;
+                            else if(network.equals(mPreferredNetwork))
+                                mPreferredNetwork = null;
+                        }
+                    }
+                    refreshUnderlyingNetwork(true);
+                });
+            }
+
+            @Override
+            public void onAvailable(@NonNull Network network) {
+                refresh(network, false);
+            }
+
             @Override
             public void onLost(@NonNull Network network) {
                 Log.d(TAG, "onLost " + network);
-
-                // If the network goes offline we roll back to the fallback DNS server to
-                // avoid possibly using a private IP DNS server not reachable anymore
-                if(network.getNetworkHandle() == mMonitoredNetwork) {
-                    Log.i(TAG, "Main network " + network + " lost, using fallback DNS " + fallbackDns);
-                    dns_server = fallbackDns;
-                    mMonitoredNetwork = 0;
-                    unregisterNetworkCallbacks();
-
-                    // change native
-                    setDnsServer(dns_server);
-                }
+                refresh(network, true);
             }
 
-            @RequiresApi(api = Build.VERSION_CODES.O)
             @Override
             public void onLinkPropertiesChanged(@NonNull Network network, @NonNull LinkProperties linkProperties) {
                 Log.d(TAG, "onLinkPropertiesChanged " + network);
+                refresh(null, false);
+            }
 
-                if(network.getNetworkHandle() == mMonitoredNetwork)
-                    handleLinkProperties(linkProperties);
+            @Override
+            public void onCapabilitiesChanged(@NonNull Network network, @NonNull NetworkCapabilities capabilities) {
+                refresh(null, false);
             }
         };
 
         try {
             Log.d(TAG, "registerNetworkCallback");
-            cm.registerNetworkCallback(
-                    new NetworkRequest.Builder()
-                            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(),
-                    mNetworkCallback);
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build();
+            if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                cm.registerBestMatchingNetworkCallback(request, mNetworkCallback, mHandler);
+            else
+                cm.registerNetworkCallback(request, mNetworkCallback);
         } catch (SecurityException e) {
             // this is a bug in Android 11 - https://issuetracker.google.com/issues/175055271?pli=1
             e.printStackTrace();
 
-            Log.w(TAG, "registerNetworkCallback failed, DNS server detection disabled");
-            dns_server = fallbackDns;
+            Log.w(TAG, "Network monitoring unavailable; retaining initial IPv4 DNS " + dns_server);
             mNetworkCallback = null;
         }
     }
@@ -1156,11 +1191,12 @@ public class CaptureService extends VpnService implements Runnable {
     }
 
     private String resolveHost(String host) {
-        if((Build.VERSION.SDK_INT < Build.VERSION_CODES.M) || (mUnderlyingNetwork == null))
+        Network network = mUnderlyingNetwork;
+        if((Build.VERSION.SDK_INT < Build.VERSION_CODES.M) || (network == null))
             return null;
 
         try {
-            return mUnderlyingNetwork.getByName(host).getHostAddress();
+            return network.getByName(host).getHostAddress();
         } catch (UnknownHostException e) {
             return null;
         }
@@ -1213,7 +1249,6 @@ public class CaptureService extends VpnService implements Runnable {
     @Override
     public void run() {
         boolean hostResolved = resolveHosts();
-        mUnderlyingNetwork = null;
 
         if(!hostResolved) {
             // fall through to cleanup
