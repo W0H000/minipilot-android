@@ -38,6 +38,7 @@ import android.view.ViewGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult;
@@ -104,7 +105,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
     private TextView mEmptyText;
     private TextView mOldConnectionsText;
     private boolean autoScroll;
-    private boolean listenerSet;
+    private ConnectionsRegister mConnsRegister;
     private ChipGroup mActiveFilter;
     private Slider mSizeSlider;
     private boolean mSizeSliderActive = false;
@@ -119,6 +120,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
     private String mDecRemoveCidr;
     private ActionMode mActionMode;
     private AlertDialog mAlertDialog;
+    private OnBackPressedCallback mBackCallback;
 
     private final ActivityResultLauncher<Intent> csvFileLauncher =
             registerForActivityResult(new StartActivityForResult(), this::csvFileResult);
@@ -131,8 +133,8 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
 
         refreshEmptyText();
 
-        registerConnsListener();
-        mRecyclerView.setEmptyView(mEmptyText); // after registerConnsListener, when the adapter is populated
+        updateConnsListener();
+        mRecyclerView.setEmptyView(mEmptyText); // after updateConnsListener, when the adapter is populated
 
         refreshMenuIcons();
 
@@ -147,7 +149,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
     public void onPause() {
         super.onPause();
 
-        unregisterConnsListener();
+        updateConnsListener();
         mRecyclerView.setEmptyView(null);
 
         if(mSearchView != null)
@@ -203,25 +205,23 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
             mEmptyText.setText(R.string.capture_not_running_status);
     }
 
-    private void registerConnsListener() {
-        if (!listenerSet) {
-            ConnectionsRegister reg = CaptureService.getConnsRegister();
+    // Only listen while resumed: a fragment which is never resumed (e.g. an offscreen ViewPager2
+    // page) never gets onPause, so a listener registered in another state would be leaked
+    private void updateConnsListener() {
+        ConnectionsRegister reg = isResumed() ? CaptureService.getConnsRegister() : null;
+        if (reg == mConnsRegister)
+            return;
 
-            if (reg != null) {
-                reg.addListener(this);
-                listenerSet = true;
-            }
+        if (mConnsRegister != null) {
+            mConnsRegister.removeListener(this);
+
+            // must be done after removeListener, which waits for any in-progress notification
+            mHandler.removeCallbacksAndMessages(null);
         }
-    }
 
-    private void unregisterConnsListener() {
-        if(listenerSet) {
-            ConnectionsRegister reg = CaptureService.getConnsRegister();
-            if (reg != null)
-                reg.removeListener(this);
-
-            listenerSet = false;
-        }
+        mConnsRegister = reg;
+        if (reg != null)
+            reg.addListener(this);
     }
 
     @Override
@@ -274,7 +274,6 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
 
         mAdapter = new ConnectionsAdapter(requireContext(), mApps);
         mRecyclerView.setAdapter(mAdapter);
-        listenerSet = false;
         registerForContextMenu(mRecyclerView);
 
         DividerItemDecoration dividerItemDecoration = new DividerItemDecoration(mRecyclerView.getContext(),
@@ -394,13 +393,10 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
             mQueryToApply = search;
 
         // Register for service status
-        CaptureService.observeStatus(this, serviceStatus -> {
+        CaptureService.observeStatus(getViewLifecycleOwner(), serviceStatus -> {
             if(serviceStatus == CaptureService.ServiceStatus.STARTED) {
                 // register the new connection register
-                if(listenerSet) {
-                    unregisterConnsListener();
-                    registerConnsListener();
-                }
+                updateConnsListener();
 
                 autoScroll = true;
                 showFabDown(false);
@@ -411,6 +407,26 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
 
             refreshMenuIcons();
         });
+
+        mBackCallback = new OnBackPressedCallback(false) {
+            @Override
+            public void handleOnBackPressed() {
+                if (mActionMode != null) {
+                    mActionMode.finish();
+                    return;
+                }
+                mMenuItemSearch.collapseActionView();
+            }
+        };
+        requireActivity().getOnBackPressedDispatcher().addCallback(getViewLifecycleOwner(), mBackCallback);
+    }
+
+    private void updateBackCallback() {
+        if (mBackCallback == null)
+            return;
+
+        boolean searchExpanded = (mSearchView != null) && !mSearchView.isIconified();
+        mBackCallback.setEnabled((mActionMode != null) || searchExpanded);
     }
 
     @Override
@@ -444,8 +460,11 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         MatchList fwWhitelist = PCAPdroid.getInstance().getFirewallWhitelist();
         MatchList decryptionList = PCAPdroid.getInstance().getDecryptionList();
 
+        // App allowlist: only meaningful when the app is known and blocked
+        boolean appBlocked = (app != null) && blocklist.matchesApp(app.getUid());
+        MatchList appAllowlist = (appBlocked) ? blocklist.findAppAllowlist(app.getPackageName()) : null;
+
         if(app != null) {
-            boolean appBlocked = blocklist.matchesApp(app.getUid());
             blockVisible = !appBlocked;
             unblockVisible = appBlocked;
 
@@ -501,6 +520,16 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
             blockVisible |= !hostBlocked;
             unblockVisible |= hostBlocked;
 
+            if(appBlocked) {
+                boolean hostAllowed = (appAllowlist != null) && appAllowlist.matchesExactHost(conn.info);
+                item = menu.findItem(R.id.allow_host);
+                item.setTitle(getString(R.string.allowlist_allow, label));
+                item.setVisible(!hostAllowed);
+                item = menu.findItem(R.id.deny_host);
+                item.setTitle(getString(R.string.allowlist_remove, label));
+                item.setVisible(hostAllowed);
+            }
+
             boolean decryptHost = decryptionList.matchesExactHost(conn.info);
             decryptVisible |= !decryptHost;
             dontDecryptVisible |= decryptHost;
@@ -553,6 +582,16 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
                 item = menu.findItem(R.id.unblock_domain);
                 item.setTitle(label);
                 item.setVisible(domainBlocked);
+
+                if(appBlocked) {
+                    boolean domainAllowed = (appAllowlist != null) && appAllowlist.matchesExactHost(domain);
+                    item = menu.findItem(R.id.allow_domain);
+                    item.setTitle(getString(R.string.allowlist_allow, label));
+                    item.setVisible(!domainAllowed);
+                    item = menu.findItem(R.id.deny_domain);
+                    item.setTitle(getString(R.string.allowlist_remove, label));
+                    item.setVisible(domainAllowed);
+                }
             }
 
             if(conn.isBlacklistedHost()) {
@@ -627,6 +666,13 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
                 .setTitle(unblockIpLabel)
                 .setVisible(ipBlocked);
 
+        if(appBlocked) {
+            // Allowlist only tracks exact IPs (no CIDR ranges in the per-app allowlist UI)
+            boolean ipAllowed = (appAllowlist != null) && appAllowlist.matchesExactIP(conn.dst_ip);
+            menu.findItem(R.id.allow_ip).setTitle(getString(R.string.allowlist_allow, label)).setVisible(!ipAllowed);
+            menu.findItem(R.id.deny_ip).setTitle(getString(R.string.allowlist_remove, label)).setVisible(ipAllowed);
+        }
+
         menu.findItem(R.id.dec_add_ip)
                 .setTitle(label)
                 .setVisible(!decryptIp);
@@ -648,6 +694,13 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
 
         menu.findItem(R.id.block_menu).setVisible((firewallVisible || showPurchaseFirewall) && blockVisible);
         menu.findItem(R.id.unblock_menu).setVisible(firewallVisible && unblockVisible);
+
+        // The per-app allowlist (exceptions to a blocked app) is scoped to the app, unlike the
+        // global Block/Unblock lists
+        MenuItem allowlistMenu = menu.findItem(R.id.app_allowlist_menu);
+        allowlistMenu.setVisible(firewallVisible && appBlocked);
+        if(app != null)
+            allowlistMenu.setTitle(getString(R.string.allow_for_app, Utils.shorten(app.getName(), max_length)));
 
         if(!conn.isBlacklisted())
             menu.findItem(R.id.mw_whitelist_menu).setVisible(false);
@@ -672,6 +725,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         boolean blocklist_changed = false;
         boolean firewall_wl_changed = false;
         boolean decryption_list_changed = false;
+        MatchList app_allowlist_changed = null;
 
         if(conn == null)
             return super.onContextItemSelected(item);
@@ -795,6 +849,42 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         } else if(id == R.id.remove_from_fw_whitelist) {
             fwWhitelist.removeApp(conn.uid);
             firewall_wl_changed = true;
+        } else if(id == R.id.allow_host) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.addHost(conn.info);
+            }
+        } else if(id == R.id.allow_ip) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.addIp(conn.dst_ip);
+            }
+        } else if(id == R.id.allow_domain) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.addHost(Utils.getSecondLevelDomain(conn.info));
+            }
+        } else if(id == R.id.deny_host) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.removeHost(conn.info);
+            }
+        } else if(id == R.id.deny_ip) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.removeIp(conn.dst_ip);
+            }
+        } else if(id == R.id.deny_domain) {
+            AppDescriptor app = mApps.getAppByUid(conn.uid, 0);
+            if(app != null) {
+                app_allowlist_changed = blocklist.getAppAllowlist(app.getPackageName());
+                app_allowlist_changed.removeHost(Utils.getSecondLevelDomain(conn.info));
+            }
         } else if(id == R.id.open_app_details) {
             Intent intent = new Intent(requireContext(), AppDetailsActivity.class);
             intent.putExtra(AppDetailsActivity.APP_UID_EXTRA, conn.uid);
@@ -826,7 +916,9 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         } else if(decryption_list_changed) {
             decryptionList.save();
             CaptureService.reloadDecryptionList();
-        } else if(blocklist_changed)
+        } else if(app_allowlist_changed != null)
+            blocklist.saveAndReload();
+        else if(blocklist_changed)
             blocklist.saveAndReload();
 
         return true;
@@ -948,7 +1040,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         // Important: must use the provided num_connections rather than accessing the register
         // in order to avoid desyncs
 
-        // using runOnUi to populate the adapter as soon as registerConnsListener is called
+        // using runOnUi to populate the adapter as soon as updateConnsListener is called
         Utils.runOnUi(() -> {
             Log.d(TAG, "New connections size: " + num_connections);
 
@@ -1002,6 +1094,20 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         mSearchView = (SearchView) mMenuItemSearch.getActionView();
         mSearchView.setOnQueryTextListener(this);
 
+        mMenuItemSearch.setOnActionExpandListener(new MenuItem.OnActionExpandListener() {
+            @Override
+            public boolean onMenuItemActionExpand(@NonNull MenuItem item) {
+                mBackCallback.setEnabled(true);
+                return true;
+            }
+
+            @Override
+            public boolean onMenuItemActionCollapse(@NonNull MenuItem item) {
+                mBackCallback.setEnabled(mActionMode != null);
+                return true;
+            }
+        });
+
         if((mQueryToApply != null) && (!mQueryToApply.isEmpty())) {
             String query = mQueryToApply;
             mQueryToApply = null;
@@ -1034,8 +1140,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
 
         boolean is_enabled = (CaptureService.getConnsRegister() != null);
 
-        mMenuItemSearch.setVisible(is_enabled); // NOTE: setEnabled does not work for this
-        //mMenuFilter.setEnabled(is_enabled);
+        mMenuItemSearch.setEnabled(is_enabled);
         mSave.setEnabled(is_enabled);
     }
 
@@ -1176,15 +1281,6 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         return true;
     }
 
-    // NOTE: dispatched from activity, returns true if handled
-    public boolean onBackPressed() {
-        if(mActionMode != null) {
-            mActionMode.finish();
-            return true;
-        }
-        return Utils.backHandleSearchview(mSearchView);
-    }
-
     private void startSelectionMode(ConnectionDescriptor conn) {
         if(mActionMode != null)
             return;
@@ -1201,6 +1297,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         }
 
         updateActionModeTitle();
+        updateBackCallback();
     }
 
     private void toggleSelection(int pos) {
@@ -1254,6 +1351,7 @@ public class ConnectionsFragment extends Fragment implements ConnectionsListener
         public void onDestroyActionMode(ActionMode mode) {
             mAdapter.clearSelection();
             mActionMode = null;
+            updateBackCallback();
         }
     };
 

@@ -21,6 +21,7 @@ package com.emanuelef.remote_capture.fragments;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -35,6 +36,7 @@ import android.view.ViewGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult;
@@ -99,8 +101,9 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
     private String mQueryToApply;
     private AppsResolver mApps;
     private boolean autoScroll;
-    private boolean listenerSet;
+    private HttpLog mHttpLog;
     private ActionMode mActionMode;
+    private OnBackPressedCallback mBackCallback;
 
     private final ActivityResultLauncher<Intent> filterLauncher =
             registerForActivityResult(new StartActivityForResult(), this::filterResult);
@@ -115,8 +118,8 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
         refreshEmptyText();
 
-        registerHttpListener();
-        mRecyclerView.setEmptyView(mEmptyText); // after registerConnsListener, when the adapter is populated
+        updateHttpListener();
+        mRecyclerView.setEmptyView(mEmptyText); // after updateHttpListener, when the adapter is populated
 
         // Check scroll state after adapter is populated, to show FAB if needed.
         // Use post to ensure it executes after the RecyclerView has completed its layout
@@ -135,7 +138,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
     public void onPause() {
         super.onPause();
 
-        unregisterHttpListener();
+        updateHttpListener();
         mRecyclerView.setEmptyView(null);
 
         if(mSearchView != null)
@@ -184,31 +187,29 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         return inflater.inflate(R.layout.connections, container, false);
     }
 
-    private void registerHttpListener() {
-        if (!listenerSet) {
-            HttpLog httpLog = CaptureService.getHttpLog();
+    // Only listen while resumed: a fragment which is never resumed (e.g. an offscreen ViewPager2
+    // page) never gets onPause, so a listener registered in another state would be leaked
+    private void updateHttpListener() {
+        HttpLog httpLog = isResumed() ? CaptureService.getHttpLog() : null;
+        if (httpLog == mHttpLog)
+            return;
 
-            if (httpLog != null) {
-                httpLog.setListener(this);
-                listenerSet = true;
+        if (mHttpLog != null) {
+            mHttpLog.setListener(null);
 
-                // Sync adapter with data that arrived while listener was unregistered
-                // (similar to ConnectionsRegister.addListener() which calls connectionsChanges)
-                if (mAdapter != null) {
-                    mAdapter.notifyDataSetChanged();
-                }
-            }
+            // must be done after setListener, which waits for any in-progress notification
+            mHandler.removeCallbacksAndMessages(null);
         }
-    }
 
-    private void unregisterHttpListener() {
-        if(listenerSet) {
-            HttpLog httpLog = CaptureService.getHttpLog();
+        mHttpLog = httpLog;
+        if (httpLog != null) {
+            httpLog.setListener(this);
 
-            if (httpLog != null)
-                httpLog.setListener(null);
-
-            listenerSet = false;
+            // Sync adapter with data that arrived while listener was unregistered
+            // (similar to ConnectionsRegister.addListener() which calls connectionsChanges)
+            if (mAdapter != null) {
+                mAdapter.notifyDataSetChanged();
+            }
         }
     }
 
@@ -307,7 +308,6 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         });
 
         autoScroll = true;
-        listenerSet = false;
         showFabDown(false);
 
         ViewCompat.setOnApplyWindowInsetsListener(view.findViewById(R.id.linearlayout), (v, windowInsets) -> {
@@ -354,11 +354,10 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         }
         refreshActiveFilter();
 
-        CaptureService.observeStatus(this, serviceStatus -> {
+        CaptureService.observeStatus(getViewLifecycleOwner(), serviceStatus -> {
             if(serviceStatus == CaptureService.ServiceStatus.STARTED) {
                 // register the new http log listener
-                unregisterHttpListener();
-                registerHttpListener();
+                updateHttpListener();
 
                 autoScroll = true;
                 showFabDown(false);
@@ -368,6 +367,26 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
             refreshMenuIcons();
         });
+
+        mBackCallback = new OnBackPressedCallback(false) {
+            @Override
+            public void handleOnBackPressed() {
+                if (mActionMode != null) {
+                    mActionMode.finish();
+                    return;
+                }
+                mMenuItemSearch.collapseActionView();
+            }
+        };
+        requireActivity().getOnBackPressedDispatcher().addCallback(getViewLifecycleOwner(), mBackCallback);
+    }
+
+    private void updateBackCallback() {
+        if (mBackCallback == null)
+            return;
+
+        boolean searchExpanded = (mSearchView != null) && !mSearchView.isIconified();
+        mBackCallback.setEnabled((mActionMode != null) || searchExpanded);
     }
 
     @Override
@@ -380,6 +399,20 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
         mSearchView = (SearchView) mMenuItemSearch.getActionView();
         mSearchView.setOnQueryTextListener(this);
+
+        mMenuItemSearch.setOnActionExpandListener(new MenuItem.OnActionExpandListener() {
+            @Override
+            public boolean onMenuItemActionExpand(@NonNull MenuItem item) {
+                mBackCallback.setEnabled(true);
+                return true;
+            }
+
+            @Override
+            public boolean onMenuItemActionCollapse(@NonNull MenuItem item) {
+                mBackCallback.setEnabled(mActionMode != null);
+                return true;
+            }
+        });
 
         if((mQueryToApply != null) && (!mQueryToApply.isEmpty())) {
             String query = mQueryToApply;
@@ -423,15 +456,6 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         recheckScroll();
         refreshEmptyText();
         return true;
-    }
-
-    // NOTE: dispatched from activity, returns true if handled
-    public boolean onBackPressed() {
-        if(mActionMode != null) {
-            mActionMode.finish();
-            return true;
-        }
-        return Utils.backHandleSearchview(mSearchView);
     }
 
     @Override
@@ -591,7 +615,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
         boolean is_enabled = (CaptureService.getHttpLog() != null);
 
-        mMenuItemSearch.setVisible(is_enabled);
+        mMenuItemSearch.setEnabled(is_enabled);
         mSave.setEnabled(is_enabled);
         if(mSaveAsHar != null)
             mSaveAsHar.setEnabled(is_enabled);
@@ -668,11 +692,13 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         final Uri txtFname = mTxtFname;
         mTxtFname = null;
 
+        final Context context = requireContext().getApplicationContext();
+
         executor.execute(() -> {
             boolean success = false;
 
             try {
-                OutputStream stream = requireActivity().getContentResolver().openOutputStream(txtFname, "rwt");
+                OutputStream stream = context.getContentResolver().openOutputStream(txtFname, "rwt");
 
                 if(stream != null) {
                     for(HttpLog.HttpRequest req : requests) {
@@ -719,7 +745,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
                 return;
 
             final boolean result = success;
-            final Utils.UriStat stat = result ? Utils.getUriStat(requireContext(), txtFname) : null;
+            final Utils.UriStat stat = result ? Utils.getUriStat(context, txtFname) : null;
 
             handler.post(() -> {
                 if(mAlertDialog != null)
@@ -727,12 +753,12 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
                 if(result) {
                     if(stat != null) {
-                        String msg = String.format(getString(R.string.file_saved_with_name), stat.name);
-                        Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show();
+                        String msg = String.format(context.getString(R.string.file_saved_with_name), stat.name);
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show();
                     } else
-                        Utils.showToast(requireContext(), R.string.save_ok);
+                        Utils.showToast(context, R.string.save_ok);
                 } else
-                    Utils.showToast(requireContext(), R.string.cannot_write_file);
+                    Utils.showToast(context, R.string.cannot_write_file);
 
                 if(mActionMode != null)
                     mActionMode.finish();
@@ -821,14 +847,16 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         final Uri harFname = mHarFname;
         mHarFname = null;
 
+        final Context context = requireContext().getApplicationContext();
+
         executor.execute(() -> {
             boolean success = false;
 
             try {
-                OutputStream stream = requireActivity().getContentResolver().openOutputStream(harFname, "rwt");
+                OutputStream stream = context.getContentResolver().openOutputStream(harFname, "rwt");
 
                 if(stream != null) {
-                    HarWriter writer = new HarWriter(requireContext(), requests);
+                    HarWriter writer = new HarWriter(context, requests);
                     writer.write(stream);
                     stream.close();
                     success = true;
@@ -842,7 +870,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
                 return;
 
             final boolean result = success;
-            final Utils.UriStat stat = result ? Utils.getUriStat(requireContext(), harFname) : null;
+            final Utils.UriStat stat = result ? Utils.getUriStat(context, harFname) : null;
 
             handler.post(() -> {
                 if(mAlertDialog != null)
@@ -850,12 +878,12 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
 
                 if(result) {
                     if(stat != null) {
-                        String msg = String.format(getString(R.string.file_saved_with_name), stat.name);
-                        Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show();
+                        String msg = String.format(context.getString(R.string.file_saved_with_name), stat.name);
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show();
                     } else
-                        Utils.showToast(requireContext(), R.string.save_ok);
+                        Utils.showToast(context, R.string.save_ok);
                 } else
-                    Utils.showToast(requireContext(), R.string.cannot_write_file);
+                    Utils.showToast(context, R.string.cannot_write_file);
 
                 if(mActionMode != null)
                     mActionMode.finish();
@@ -879,6 +907,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         mActionMode = ((AppCompatActivity) requireActivity()).startSupportActionMode(mActionModeCallback);
         mAdapter.selectItem(position);
         updateActionModeTitle();
+        updateBackCallback();
     }
 
     private void toggleSelection(int pos) {
@@ -935,6 +964,7 @@ public class HttpLogFragment extends Fragment implements HttpLog.Listener, MenuP
         public void onDestroyActionMode(ActionMode mode) {
             mAdapter.clearSelection();
             mActionMode = null;
+            updateBackCallback();
         }
     };
 

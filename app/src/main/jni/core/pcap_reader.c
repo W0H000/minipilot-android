@@ -14,7 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with PCAPdroid.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright 2021-25 - Emanuele Faranda
+ * Copyright 2021-26 - Emanuele Faranda
  */
 
 #include <stdio.h>
@@ -53,6 +53,7 @@ struct pd_reader {
     mapped_uid_t *mapped_uids;
     long cur_block_pos;
     size_t cur_block_size;
+    int64_t pkt_data_offset;
 };
 
 static int linktype_to_dlt(int linktype) {
@@ -156,6 +157,7 @@ void pd_destroy_reader(pd_reader_t *reader) {
 
     mapped_uid_t *entry, *tmp;
     HASH_ITER(hh, reader->mapped_uids, entry, tmp) {
+        HASH_DEL(reader->mapped_uids, entry);
         pd_free(entry);
     }
 
@@ -181,6 +183,10 @@ bool pd_has_seen_dump_extensions(pd_reader_t *reader) {
 
 bool pd_has_unsupported_dlt_packets(pd_reader_t *reader) {
     return reader->has_unsupported_dlt_packets;
+}
+
+int64_t pd_get_packet_data_offset(pd_reader_t *reader) {
+    return reader->pkt_data_offset;
 }
 
 static bool reserve_buffer(pd_reader_t *reader, size_t size) {
@@ -219,6 +225,7 @@ static reader_rv pd_pcap_read_next(pd_reader_t *reader, pcapd_hdr_t *hdr, char* 
     }
 
     int size = min(rec.incl_len, PCAPD_SNAPLEN);
+    reader->pkt_data_offset = ftell(reader->fp);
 
     if (fread(buffer, size, 1, reader->fp) != 1) {
         if (ferror(reader->fp)) {
@@ -296,6 +303,7 @@ static reader_rv read_enhanced_packet_block(pd_reader_t *reader, pcapd_hdr_t *hd
     }
 
     int size = min(enh.captured_len, PCAPD_SNAPLEN);
+    reader->pkt_data_offset = ftell(reader->fp);
 
     if (fread(buffer, size, 1, reader->fp) != 1) {
         if (ferror(reader->fp)) {
@@ -336,6 +344,9 @@ static reader_rv read_enhanced_packet_block(pd_reader_t *reader, pcapd_hdr_t *hd
 
                 size_t read_size = min(opt.length, sizeof(comment) - 1);
                 if (fread(comment, read_size, 1, reader->fp) == 1) {
+                    // rewind so the generic option skip below advances consistently
+                    fseek(reader->fp, -(long)read_size, SEEK_CUR);
+
                     int parsed_length;
                     unsigned int uid;
                     comment[read_size] = '\0';
@@ -358,9 +369,22 @@ static reader_rv read_enhanced_packet_block(pd_reader_t *reader, pcapd_hdr_t *hd
                             }
                         } else
                             log_w("Ignore UID without mapping: %u", uid);
-
-                        break;
                     }
+                }
+            } else if ((opt.code == 2) && (opt.length >= 4)) { // EPB flags
+                // the low 2 bits encode the direction (01 = inbound, 10 = outbound)
+                uint32_t epb_flags;
+
+                if (fread(&epb_flags, sizeof(epb_flags), 1, reader->fp) == 1) {
+                    // rewind so the generic option skip below advances consistently
+                    fseek(reader->fp, -(long)sizeof(epb_flags), SEEK_CUR);
+
+                    uint8_t dir = epb_flags & 0x3;
+
+                    if (dir == 1)
+                        hdr->flags &= ~PCAPD_FLAG_TX;
+                    else if (dir == 2)
+                        hdr->flags |= PCAPD_FLAG_TX;
                 }
             }
 

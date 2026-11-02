@@ -14,7 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with PCAPdroid.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright 2020-21 - Emanuele Faranda
+ * Copyright 2020-26 - Emanuele Faranda
  */
 
 package com.emanuelef.remote_capture.adapters;
@@ -34,9 +34,9 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.collection.ArraySet;
 import androidx.core.content.ContextCompat;
-import androidx.preference.PreferenceManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.emanuelef.remote_capture.AppIconLoader;
 import com.emanuelef.remote_capture.Log;
 import com.emanuelef.remote_capture.PCAPdroid;
 import com.emanuelef.remote_capture.interfaces.ConnectionsListener;
@@ -49,7 +49,6 @@ import com.emanuelef.remote_capture.R;
 import com.emanuelef.remote_capture.Utils;
 import com.emanuelef.remote_capture.model.FilterDescriptor;
 import com.emanuelef.remote_capture.model.MatchList;
-import com.emanuelef.remote_capture.model.Prefs;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -121,11 +120,9 @@ public class ConnectionsAdapter extends RecyclerView.Adapter<ConnectionsAdapter.
         @SuppressWarnings("deprecation")
         public void bindConn(Context context, ConnectionDescriptor conn, AppsResolver apps, Drawable unknownIcon) {
             AppDescriptor app = apps.getAppByUid(conn.uid, 0);
-            Drawable appIcon;
             String l7Text;
 
-            appIcon = ((app != null) && (app.getIcon() != null)) ? app.getIcon() : unknownIcon;
-            icon.setImageDrawable(appIcon);
+            AppIconLoader.setIcon(icon, app, unknownIcon);
 
             if((conn.info != null) && (conn.info.length() > 0))
                 remote.setText(conn.info);
@@ -475,7 +472,7 @@ public class ConnectionsAdapter extends RecyclerView.Adapter<ConnectionsAdapter.
     public String dumpConnectionsCsv(boolean selectedOnly) {
         StringBuilder builder = new StringBuilder();
         AppsResolver resolver = new AppsResolver(mContext);
-        boolean malwareDetection = Prefs.isMalwareDetectionEnabled(mContext, PreferenceManager.getDefaultSharedPreferences(mContext));
+        boolean malwareDetection = CaptureService.isMalwareDetectionEnabled();
 
         String header = mContext.getString(R.string.connections_csv_fields);
         builder.append(header);

@@ -24,7 +24,7 @@ The selection is logged with the network ID, interface and IPv4 DNS address.
 
 If the selected network has no IPv4 DNS, the configured IPv4 DNS is used as a
 fallback. Disabling **Use system DNS** continues to use the configured resolver.
-IPv6 DNS and Android versions before 6 retain their existing configured behavior;
+IPv6 DNS retains its existing configured behavior;
 this change does not introduce a new IPv6 DNS forwarding mechanism or change IP
 capture mode. It does not rewrite saved DNS preferences.
 
