@@ -14,12 +14,11 @@
  * You should have received a copy of the GNU General Public License
  * along with PCAPdroid.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright 2020-21 - Emanuele Faranda
+ * Copyright 2020-26 - Emanuele Faranda
  */
 package com.emanuelef.remote_capture.activities;
 
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.util.Pair;
 import android.view.LayoutInflater;
@@ -29,10 +28,10 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.CheckBox;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.ActionBar;
 import androidx.core.view.MenuProvider;
-import androidx.preference.PreferenceManager;
 
 import com.emanuelef.remote_capture.Billing;
 import com.emanuelef.remote_capture.CaptureService;
@@ -45,7 +44,6 @@ import com.emanuelef.remote_capture.model.ConnectionDescriptor.DecryptionStatus;
 import com.emanuelef.remote_capture.model.ConnectionDescriptor.FilteringStatus;
 import com.emanuelef.remote_capture.model.FilterDescriptor;
 import com.emanuelef.remote_capture.model.ListInfo;
-import com.emanuelef.remote_capture.model.Prefs;
 import com.google.android.material.chip.Chip;
 import com.google.android.material.chip.ChipGroup;
 import com.google.android.material.slider.Slider;
@@ -78,6 +76,13 @@ public class EditFilterActivity extends BaseActivity implements MenuProvider {
             actionBar.setDisplayHomeAsUpEnabled(true);
             actionBar.setHomeAsUpIndicator(R.drawable.ic_close);
         }
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                finishOk();
+            }
+        });
 
         Intent intent = getIntent();
         if(intent != null) {
@@ -131,9 +136,8 @@ public class EditFilterActivity extends BaseActivity implements MenuProvider {
         }
 
         Billing billing = Billing.newInstance(this);
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
 
-        if(!Prefs.isMalwareDetectionEnabled(this, prefs))
+        if(!CaptureService.isMalwareDetectionEnabled())
             mOnlyBlacklisted.setVisibility(View.GONE);
 
         if(billing.isFirewallVisible()) {
@@ -247,13 +251,6 @@ public class EditFilterActivity extends BaseActivity implements MenuProvider {
     public boolean onSupportNavigateUp() {
         finishOk();
         return true;
-    }
-
-    @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() {
-        finishOk();
-        super.onBackPressed();
     }
 
     @Override

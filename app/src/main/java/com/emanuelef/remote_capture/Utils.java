@@ -14,13 +14,14 @@
  * You should have received a copy of the GNU General Public License
  * along with PCAPdroid.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright 2020-25 - Emanuele Faranda
+ * Copyright 2020-26 - Emanuele Faranda
  */
 
 package com.emanuelef.remote_capture;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.PendingIntent;
@@ -60,6 +61,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
@@ -69,7 +71,6 @@ import android.text.SpannedString;
 import android.text.TextUtils;
 import android.text.method.LinkMovementMethod;
 import android.text.style.StyleSpan;
-import android.util.Patterns;
 import android.view.Display;
 import android.view.MenuItem;
 import android.view.View;
@@ -90,12 +91,14 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.annotation.WorkerThread;
 import androidx.appcompat.app.AlertDialog;
-import androidx.appcompat.app.AppCompatDelegate;
 import androidx.appcompat.widget.SearchView;
+import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
+import androidx.core.text.BidiFormatter;
 import androidx.core.text.HtmlCompat;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -134,6 +137,10 @@ import java.net.URL;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
@@ -166,6 +173,8 @@ public class Utils {
     static final String TAG = "Utils";
     public static final String INTERACT_ACROSS_USERS = "android.permission.INTERACT_ACROSS_USERS";
     public static final String PCAPDROID_WEBSITE = "https://pcapdroid.org";
+    private static final String DOWNLOADS_FOLDER = "PCAPdroid";
+    private static final String EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents";
     public static final int PER_USER_RANGE = 100000;
     public static final int UID_UNKNOWN = -1;
     public static final int UID_NO_FILTER = -2;
@@ -251,6 +260,7 @@ public class Utils {
         }
     }
 
+    @SuppressWarnings("deprecation")
     public static String getCountryName(Context context, String country_code) {
         Locale cur_locale = getPrimaryLocale(context);
         return(new Locale(cur_locale.getCountry(), country_code)).getDisplayCountry();
@@ -271,15 +281,16 @@ public class Utils {
         return String.format(locale, "%,d", num);
     }
 
-    public static String formatDuration(long seconds) {
+    public static String formatDuration(Context context, long seconds) {
         if(seconds == 0)
-            return "< 1 s";
+            return context.getString(R.string.less_than_one_sec);
         else if(seconds < 60)
-            return String.format("%d s", seconds);
+            return context.getString(R.string.n_seconds, seconds);
         else if(seconds < 3600)
-            return String.format("> %d m", seconds / 60);
+            return context.getString(R.string.n_minutes, seconds / 60);
         else
-            return String.format("> %d h", seconds / 3600);
+            return context.getString(R.string.n_hours_minutes,
+                    seconds / 3600, (seconds % 3600) / 60);
     }
 
     public static String formatEpochShort(Context context, long epoch) {
@@ -776,6 +787,16 @@ public class Utils {
         return(Utils.getUniqueFileName(context, pcapng_format ? "pcapng" : "pcap"));
     }
 
+    public static String removePcapExtension(String fname) {
+        if (fname == null)
+            return null;
+        if (fname.endsWith(".pcapng"))
+            return fname.substring(0, fname.length() - 7);
+        if (fname.endsWith(".pcap"))
+            return fname.substring(0, fname.length() - 5);
+        return fname;
+    }
+
     // Returns the export filename with the given extension.
     // If a PCAP file was loaded by the user, uses that filename as base.
     // Otherwise, generates a unique filename based on date/time.
@@ -865,6 +886,40 @@ public class Utils {
         return(uiModeManager.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION);
     }
 
+    // exchanging traffic with the LAN only requires a runtime permission since API 37
+    public static boolean hasLocalNetworkPermission(Context context) {
+        if(Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN)
+            return true;
+
+        return(context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+                PackageManager.PERMISSION_GRANTED);
+    }
+
+    // returns false if the permission cannot be requested
+    public static boolean requestLocalNetworkPermission(ActivityResultLauncher<String> launcher) {
+        if(Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN)
+            return false;
+
+        launcher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK);
+        return true;
+    }
+
+    // true if the user has denied the permission at least once, without permanently denying it
+    public static boolean shouldShowLocalNetworkPermissionRationale(Activity activity) {
+        if(Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN)
+            return false;
+
+        return ActivityCompat.shouldShowRequestPermissionRationale(activity,
+                Manifest.permission.ACCESS_LOCAL_NETWORK);
+    }
+
+    public static void openAppSettings(Context ctx, String packageName) {
+        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        intent.setData(Uri.fromParts("package", packageName, null));
+
+        startActivity(ctx, intent);
+    }
+
     public static String getAppVersion(Context context) {
         String appver;
 
@@ -915,14 +970,15 @@ public class Utils {
 
         //values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
         values.put(MediaStore.MediaColumns.DISPLAY_NAME, fname);
-        String selectQuery = "";
+        String selectQuery;
+        String[] selectArgs;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // On Android Q+ cannot directly access the external dir. Must use RELATIVE_PATH instead.
             // Important: trailing "/" required for the selectQuery
-            String relPath = Environment.DIRECTORY_DOWNLOADS + "/PCAPdroid/";
-            selectQuery = MediaStore.MediaColumns.RELATIVE_PATH + "='" + relPath + "' AND " +
-                MediaStore.MediaColumns.DISPLAY_NAME + "='" + fname + "'";
+            String relPath = getDownloadsRelativePath();
+            selectQuery = relativePathSelection();
+            selectArgs = new String[]{relPath, fname};
             values.put(MediaStore.MediaColumns.RELATIVE_PATH, relPath);
         } else {
             if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -932,36 +988,29 @@ public class Utils {
                 }
             }
 
-            // NOTE: context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) returns an app internal folder
-            File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-            File folder = new File(downloadsDir + "/PCAPdroid");
+            File folder = getDownloadsFolder();
             try {
                 folder.mkdirs();
             } catch (Exception ignored) {}
             if(!folder.exists())
-                folder = downloadsDir;
+                folder = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
 
             String path = folder + "/" + fname;
             Log.d(TAG, "getDownloadsUri: path=" + path);
-            selectQuery = MediaStore.MediaColumns.DATA + "='" + path + "'";
+            selectQuery = MediaStore.MediaColumns.DATA + "=?";
+            selectArgs = new String[]{path};
             values.put(MediaStore.MediaColumns.DATA, path);
         }
 
-        Uri externalUri = MediaStore.Files.getContentUri("external");
-
         // if the file with given name already exists, overwrite it
-        try (Cursor cursor = context.getContentResolver().query(externalUri, new String[]{MediaStore.MediaColumns._ID}, selectQuery, null, null)) {
-            if ((cursor != null) && cursor.moveToFirst()) {
-                long id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
-                Uri existingUri = ContentUris.withAppendedId(externalUri, id);
-
-                Log.d(TAG, "getDownloadsUri: overwriting file " + existingUri);
-                return existingUri;
-            }
-        } catch (Exception ignored) {}
+        Uri existingUri = queryExternalFile(context, selectQuery, selectArgs);
+        if (existingUri != null) {
+            Log.d(TAG, "getDownloadsUri: overwriting file " + existingUri);
+            return existingUri;
+        }
 
         try {
-            Uri newUri = context.getContentResolver().insert(externalUri, values);
+            Uri newUri = context.getContentResolver().insert(MediaStore.Files.getContentUri("external"), values);
             Log.d(TAG, "getDownloadsUri: new file " + newUri);
             return newUri;
         } catch (Exception e) {
@@ -970,6 +1019,59 @@ public class Utils {
             Utils.showToastLong(context, R.string.write_ext_storage_failed);
             return(null);
         }
+    }
+
+    private static File getDownloadsFolder() {
+        // NOTE: context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) returns an app internal folder,
+        // which is not what we want
+        return new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), DOWNLOADS_FOLDER);
+    }
+
+    /* Look for a file with the given name in the PCAPdroid downloads folder.
+     * NOTE: on Android Q+, only the files owned by this installation can be found, so a file
+     * written by a previous installation of PCAPdroid is not visible. */
+    public static @Nullable Uri findDownloadsUri(Context context, String fname) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            return queryExternalFile(context, relativePathSelection(), getDownloadsRelativePath(), fname);
+
+        String dataSelection = MediaStore.MediaColumns.DATA + "=?";
+        Uri uri = queryExternalFile(context, dataSelection, getDownloadsFolder() + "/" + fname);
+
+        // getDownloadsUri writes into the downloads root when the PCAPdroid folder cannot be created
+        if (uri == null)
+            uri = queryExternalFile(context, dataSelection,
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + fname);
+
+        return uri;
+    }
+
+    private static String getDownloadsRelativePath() {
+        return Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_FOLDER + "/";
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.Q)
+    private static String relativePathSelection() {
+        return MediaStore.MediaColumns.RELATIVE_PATH + "=? AND " + MediaStore.MediaColumns.DISPLAY_NAME + "=?";
+    }
+
+    private static @Nullable Uri queryExternalFile(Context context, String selectQuery, String... selectArgs) {
+        Uri externalUri = MediaStore.Files.getContentUri("external");
+
+        try (Cursor cursor = context.getContentResolver().query(externalUri, new String[]{MediaStore.MediaColumns._ID}, selectQuery, selectArgs, null)) {
+            if ((cursor != null) && cursor.moveToFirst()) {
+                long id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
+                return ContentUris.withAppendedId(externalUri, id);
+            }
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
+    // The document URI of the PCAPdroid downloads folder, to be used as the initial location of a
+    // file/folder picker
+    public static Uri getDownloadsFolderDocumentUri() {
+        return DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY,
+                "primary:" + Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_FOLDER);
     }
 
     public static boolean isRootAvailable() {
@@ -1015,6 +1117,19 @@ public class Utils {
         intent.setType("text/plain");
         intent.putExtra(android.content.Intent.EXTRA_SUBJECT, subject);
         intent.putExtra(android.content.Intent.EXTRA_TEXT, contents);
+
+        startActivity(ctx, Intent.createChooser(intent, ctx.getResources().getString(R.string.share)));
+    }
+
+    public static void shareCapture(Context ctx, Uri uri) {
+        if (uri == null)
+            return;
+
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("application/cap");
+        intent.putExtra(Intent.EXTRA_STREAM, uri);
+        intent.setClipData(ClipData.newRawUri("", uri));
+        intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
         startActivity(ctx, Intent.createChooser(intent, ctx.getResources().getString(R.string.share)));
     }
@@ -1112,8 +1227,8 @@ public class Utils {
                 try {
                     // Necessary otherwise the connection will stay open
                     con.setRequestProperty("Connection", "Close");
-                    con.setConnectTimeout(5000);
-                    con.setReadTimeout(5000);
+                    con.setConnectTimeout(15000);
+                    con.setReadTimeout(15000);
 
                     try(InputStream in = new BufferedInputStream(con.getInputStream())) {
                         byte[] bytesIn = new byte[4096];
@@ -1156,7 +1271,7 @@ public class Utils {
 
     // NOTE: base32 padding not supported
     public static byte[] base32Decode(String s) {
-        s = s.toUpperCase().replace("\n", "");
+        s = s.toUpperCase(Locale.ROOT).replace("\n", "");
         byte[] rv = new byte[s.length() * 5 / 8];
         int i = 0;
         int bitsRemaining = 8;
@@ -1248,12 +1363,15 @@ public class Utils {
             sha1.update(signatures[0].toByteArray());
 
             // keytool -printcert -jarfile file.apk
+            // see also tools/verify_apk_signature.sh
             String hex = byteArrayToHex(sha1.digest(), sha1.getDigestLength());
             switch(hex) {
                 case "511140392BFF2CFB4BD825895DD6510CE1807F6D":
                     return BuildType.DEBUG;
                 case "EE953D4F988C8AC17575DFFAA1E3BBCE2E29E81D":
-                    return isPlaystore() ? BuildType.PLAYSTORE : BuildType.GITHUB;
+                    return isPlaystore() ? BuildType.PLAYSTORE : BuildType.UNKNOWN;
+                case "77DA81218F6E0D91220700317B2BCB906F4D4255":
+                    return BuildType.GITHUB;
                 case "72777D6939EF150099219BBB68C17220DB28EA8E":
                     return BuildType.FDROID;
             }
@@ -1393,6 +1511,21 @@ public class Utils {
         return ((c >= 32) && (c <= 126)) || (c == '\r') || (c == '\n') || (c == '\t');
     }
 
+    // Decode data as UTF-8, returning null if it contains invalid sequences. Unlike
+    // new String(data, UTF_8), this never silently replaces bytes with U+FFFD
+    @Nullable
+    public static String decodeUtf8Strict(byte[] data) {
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+
+        try {
+            return decoder.decode(ByteBuffer.wrap(data)).toString();
+        } catch (CharacterCodingException e) {
+            return null;
+        }
+    }
+
     // Get a CharSequence which properly displays clickable links obtained by formatting a parametric
     // string resource with the provided args. See setTextUrls
     // https://stackoverflow.com/questions/23503642/how-to-use-formatted-strings-together-with-placeholders-in-android
@@ -1506,16 +1639,6 @@ public class Utils {
         searchView.post(() -> searchView.setQuery(query, true));
     }
 
-    public static boolean backHandleSearchview(SearchView searchView) {
-        if((searchView != null) && !searchView.isIconified()) {
-            // Required to close the SearchView when the search submit button was not pressed
-            searchView.setIconified(true);
-            return true;
-        }
-
-        return false;
-    }
-
     public static String getDeviceModel() {
         if(Build.MODEL.startsWith(Build.MANUFACTURER))
             return Build.MANUFACTURER;
@@ -1612,16 +1735,19 @@ public class Utils {
 
     public static boolean validatePort(String value) {
         try {
-            int val = Integer.parseInt(value);
-            return((val > 0) && (val < 65535));
+            return validatePort(Integer.parseInt(value));
         } catch(NumberFormatException e) {
             return false;
         }
     }
 
+    public static boolean validatePort(int port) {
+        return((port > 0) && (port <= 65535));
+    }
+
     // from bouncycastle
     private static boolean isValidIPv6(String address) {
-        if (address.length() == 0)
+        if (address.isEmpty())
             return false;
 
         char firstChar = address.charAt(0);
@@ -1697,10 +1823,12 @@ public class Utils {
     public static boolean validateIpAddress(String value) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             return (InetAddresses.isNumericAddress(value));
-        else {
-            Matcher matcher = Patterns.IP_ADDRESS.matcher(value);
-            return(matcher.matches());
-        }
+        else
+            return validateIpv4Address(value) || isValidIPv6(value);
+    }
+
+    public static boolean validateHostOrIp(String value) {
+        return validateIpAddress(value) || validateHost(value);
     }
 
     // https://mkyong.com/regular-expressions/how-to-validate-ip-address-with-regular-expression/
@@ -1738,6 +1866,8 @@ public class Utils {
                 (!is_v6 && (prefix <= 32)));
     }
 
+    private static final Pattern INVALID_HOST_CHARS = Pattern.compile("[A-Z\\s?!=`@]");
+
     // rough validation
     public static boolean validateHost(String host) {
         int len = host.length();
@@ -1745,9 +1875,21 @@ public class Utils {
             return false;
         if((host.charAt(0) == '-') || (host.charAt(len-1) == '-'))
             return false;
-        if(host.matches(".*[A-Z\\s?!=`@].*"))
+        if(INVALID_HOST_CHARS.matcher(host).find())
             return false;
         return true;
+    }
+
+    public static boolean isLocalhost(String host) {
+        if (host.equals("localhost") || host.equals("::1"))
+            return true;
+
+        return host.startsWith("127.") && validateIpv4Address(host);
+    }
+
+    // prevents the bidi reordering of a Latin/numeric value embedded in an RTL text
+    public static String bidiWrap(String text) {
+        return BidiFormatter.getInstance().unicodeWrap(text);
     }
 
     public static String uriToFilePath(Context ctx, Uri uri) {
@@ -1816,11 +1958,25 @@ public class Utils {
     }
 
     public static boolean isExternalStorageDocument(Uri uri) {
-        return "com.android.externalstorage.documents".equals(uri.getAuthority());
+        return EXTERNAL_STORAGE_AUTHORITY.equals(uri.getAuthority());
     }
 
     public static boolean isDownloadsDocument(Uri uri) {
         return "com.android.providers.downloads.documents".equals(uri.getAuthority());
+    }
+
+    // true if the URI comes from the mediastore, e.g. as returned by getDownloadsUri
+    public static boolean isMediaStoreUri(Uri uri) {
+        return "media".equals(uri.getAuthority());
+    }
+
+    // true if the URI comes from ACTION_OPEN_DOCUMENT_TREE, i.e. it grants a whole folder
+    public static boolean isTreeUri(Uri uri) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N)
+            return DocumentsContract.isTreeUri(uri);
+
+        List<String> paths = uri.getPathSegments();
+        return (paths.size() >= 2) && "tree".equals(paths.get(0));
     }
 
     public static class UriStat {
@@ -1978,6 +2134,27 @@ public class Utils {
         }
     }
 
+    public static boolean isUriReadable(Context ctx, Uri uri) {
+        try (ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(uri, "r")) {
+            return (pfd != null);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    public static File findSiblingKeylog(String pcap_path) {
+        File pcapFile = new File(pcap_path);
+        File parent = pcapFile.getParentFile();
+        if (parent == null)
+            return null;
+
+        String name = pcapFile.getName();
+        int dotIndex = name.lastIndexOf('.');
+        String baseName = (dotIndex > 0) ? name.substring(0, dotIndex) : name;
+        File candidate = new File(parent, baseName + ".keylog");
+        return (candidate.isFile() && isReadable(candidate.getAbsolutePath())) ? candidate : null;
+    }
+
     public static boolean isPcapng(Context ctx, Uri uri) {
         try (InputStream in_stream = ctx.getContentResolver().openInputStream(uri)) {
             try (DataInputStream data_in = new DataInputStream(in_stream)) {
@@ -2017,5 +2194,19 @@ public class Utils {
     public static boolean isSemanticVersionCompatible(String a, String b) {
         int va = getMajorVersion(a);
         return (va >= 0) && (va == getMajorVersion(b));
+    }
+
+    // Reads len bytes at the given offset. Positional reads are thread safe on the FileChannel
+    @WorkerThread
+    public static byte[] readFully(FileChannel channel, long offset, int len) throws IOException {
+        ByteBuffer buf = ByteBuffer.allocate(len);
+
+        while (buf.hasRemaining()) {
+            int read = channel.read(buf, offset + buf.position());
+            if (read < 0)
+                throw new IOException("Unexpected EOF at " + (offset + buf.position()));
+        }
+
+        return buf.array();
     }
 }

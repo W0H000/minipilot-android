@@ -480,7 +480,7 @@ static void handle_ushark_http2_reset(uint32_t conv_id, uint32_t stream_id) {
 
 /* Returns true if packet is valid. If false is returned, the pkt must still be dumped, so a call to
  * pd_dump_packet is required. */
-static bool handle_packet(pcapdroid_t *pd, pcapd_hdr_t *hdr, const char *buffer, int ipoffset) {
+static bool handle_packet(pcapdroid_t *pd, pcapd_hdr_t *hdr, const char *buffer, int ipoffset, int64_t data_offset) {
     zdtun_pkt_t pkt;
     pcap_conn_t *conn = NULL;
     uint8_t is_tx = (hdr->flags & PCAPD_FLAG_TX); // NOTE: the direction uses an heuristic so it may be wrong
@@ -580,6 +580,9 @@ static bool handle_packet(pcapdroid_t *pd, pcapd_hdr_t *hdr, const char *buffer,
     pd_init_pkt_context(&pinfo, &pkt, is_tx, &conn_tuple, conn->data, &tv);
     g_cur_ctx = &pinfo;
 
+    if (data_offset >= 0)
+        pinfo.file_offset = data_offset + ipoffset;
+
     if (pd->pcap.usk && (pkt.len > 0)) {
         struct pcap_pkthdr pcap_hdr;
         pcap_hdr.len = pcap_hdr.caplen = pkt.len;
@@ -664,6 +667,29 @@ void pcap_iter_connections(pcapdroid_t *pd, conn_cb cb) {
             return;
     }
 }
+
+/* ******************************************************* */
+
+#ifndef ANDROID
+
+void pcap_add_test_connection(pcapdroid_t *pd, const zdtun_5tuple_t *tuple, pd_conn_t *data) {
+    pcap_conn_t *conn = pd_malloc(sizeof(pcap_conn_t));
+    conn->tuple = *tuple;
+    conn->data = data;
+
+    HASH_ADD(hh, pd->pcap.connections, tuple, sizeof(zdtun_5tuple_t), conn);
+}
+
+void pcap_free_test_connections(pcapdroid_t *pd) {
+    pcap_conn_t *conn, *tmp;
+
+    HASH_ITER(hh, pd->pcap.connections, conn, tmp) {
+        HASH_DEL(pd->pcap.connections, conn);
+        pd_free(conn);
+    }
+}
+
+#endif // !ANDROID
 
 /* ******************************************************* */
 
@@ -899,10 +925,12 @@ int run_pcap(pcapdroid_t *pd) {
             continue;
         }
 
-        if(!handle_packet(pd, &hdr, buffer, ipoffset)) {
+        int64_t data_offset = (reader != NULL) ? pd_get_packet_data_offset(reader) : -1;
+
+        if(!handle_packet(pd, &hdr, buffer, ipoffset, data_offset)) {
             // packet was rejected (unsupported/corrupted), dump to PCAP file anyway
             struct timeval tv = hdr.ts;
-            pd_dump_packet(pd, buffer + ipoffset, hdr.len - ipoffset, &tv, hdr.uid, hdr.ifid);
+            pd_dump_packet(pd, buffer + ipoffset, hdr.len - ipoffset, &tv, hdr.uid, hdr.ifid, (hdr.flags & PCAPD_FLAG_TX) != 0);
         }
 
     housekeeping:

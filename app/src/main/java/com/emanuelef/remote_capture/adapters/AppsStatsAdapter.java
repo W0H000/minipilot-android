@@ -14,7 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with PCAPdroid.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright 2020-21 - Emanuele Faranda
+ * Copyright 2020-26 - Emanuele Faranda
  */
 
 package com.emanuelef.remote_capture.adapters;
@@ -34,6 +34,7 @@ import androidx.core.content.ContextCompat;
 import androidx.preference.PreferenceManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.emanuelef.remote_capture.AppIconLoader;
 import com.emanuelef.remote_capture.Billing;
 import com.emanuelef.remote_capture.PCAPdroid;
 import com.emanuelef.remote_capture.R;
@@ -58,6 +59,7 @@ public class AppsStatsAdapter extends RecyclerView.Adapter<AppsStatsAdapter.View
     private final Blocklist mBlocklist;
     private final MatchList mWhitelist;
     private final boolean mFirewallAvailable;
+    private boolean mWhitelistEnabled;
     private View.OnClickListener mListener;
     private List<AppStats> mStats;
     private final AppsResolver mApps;
@@ -93,13 +95,10 @@ public class AppsStatsAdapter extends RecyclerView.Adapter<AppsStatsAdapter.View
         }
 
         public void bindAppStats(AppStats stats) {
-            Drawable appIcon;
-
             // NOTE: can be null
             AppDescriptor app = (mApps != null) ? mApps.getAppByUid(stats.getUid(), 0) : null;
 
-            appIcon = ((app != null) && (app.getIcon() != null)) ? app.getIcon() : mUnknownIcon;
-            icon.setImageDrawable(appIcon);
+            AppIconLoader.setIcon(icon, app, mUnknownIcon);
 
             String info_txt = (app != null) ? app.getName() : Integer.toString(stats.getUid());
 
@@ -111,12 +110,11 @@ public class AppsStatsAdapter extends RecyclerView.Adapter<AppsStatsAdapter.View
             boolean isGracedApp = mBlocklist.isExemptedApp(stats.getUid());
             boolean isBlockedApp = mBlocklist.matchesApp(stats.getUid());
             boolean isWhitelistedApp = mWhitelist.matchesApp(stats.getUid());
-            boolean isWhitelistEnabled = Prefs.isFirewallEnabled(mContext, mPrefs) && Prefs.isFirewallWhitelistMode(mPrefs);
 
             sent_rcvd.setText(mContext.getString(R.string.rcvd_and_sent, Utils.formatBytes(stats.rcvdBytes), Utils.formatBytes(stats.sentBytes)));
             traffic.setText(Utils.formatBytes(stats.sentBytes + stats.rcvdBytes));
             blockedFlag.setVisibility(isBlockedApp ? View.VISIBLE : View.GONE);
-            whitelistedFlag.setVisibility(isWhitelistEnabled && isWhitelistedApp ? View.VISIBLE : View.GONE);
+            whitelistedFlag.setVisibility(mWhitelistEnabled && isWhitelistedApp ? View.VISIBLE : View.GONE);
             tempUnblocked.setVisibility(isGracedApp ? View.VISIBLE : View.GONE);
         }
     }
@@ -132,6 +130,7 @@ public class AppsStatsAdapter extends RecyclerView.Adapter<AppsStatsAdapter.View
         mListener = null;
         mStats = new ArrayList<>();
         mFirewallAvailable = Billing.newInstance(context).isFirewallVisible();
+        mWhitelistEnabled = isWhitelistEnabled();
         mSortField = SortField.NAME;
         setHasStableIds(true);
     }
@@ -241,7 +240,12 @@ public class AppsStatsAdapter extends RecyclerView.Adapter<AppsStatsAdapter.View
         });
 
         mStats = stats;
+        mWhitelistEnabled = isWhitelistEnabled();
         notifyDataSetChanged();
+    }
+
+    private boolean isWhitelistEnabled() {
+        return (Prefs.isFirewallEnabled(mContext, mPrefs) && Prefs.isFirewallWhitelistMode(mPrefs));
     }
 
     public SortField getSortField() {
